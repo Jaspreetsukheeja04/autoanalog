@@ -20,6 +20,7 @@ ref_ic50  = snakemake.config.get("reference_ic50_nm", 0)
 mfpgen = rdFingerprintGenerator.GetMorganGenerator(
     radius=2, fpSize=2048)
 
+# 15 substituents — Topliss + Hansch-Craig + Bioisostere
 SUB_SMILES = [
     ("F",        "Fluorine"),
     ("Cl",       "Chlorine"),
@@ -46,9 +47,9 @@ RING_SWAPS = {
 }
 
 BIOISOSTERES = {
-    "sulfonamide_to_urea":     ("NS(=O)(=O)","NC(=O)N"),
-    "sulfonamide_to_amide":    ("NS(=O)(=O)","NC(=O)"),
-    "sulfonamide_to_carbamate":("NS(=O)(=O)","NC(=O)O"),
+    "sulfonamide_to_urea":      ("NS(=O)(=O)","NC(=O)N"),
+    "sulfonamide_to_amide":     ("NS(=O)(=O)","NC(=O)"),
+    "sulfonamide_to_carbamate": ("NS(=O)(=O)","NC(=O)O"),
 }
 
 KNOWN = [
@@ -72,9 +73,11 @@ def sanitize(smi):
     except: return None
 
 def get_inchikey(mol):
+    """InChIKey for isomer filtering"""
     try:
         key = MolToInchiKey(mol)
-        return key if key else Chem.MolToSmiles(mol, canonical=True)
+        return key if key else Chem.MolToSmiles(
+            mol, canonical=True)
     except:
         return Chem.MolToSmiles(mol, canonical=True)
 
@@ -98,24 +101,24 @@ def get_descriptors(mol, name, mod, ref_mol):
         pred_ic50 = None
         vs_ref = "Unknown"
         if ref_ic50 > 0 and tan > 0:
-            pred_ic50 = round(ref_ic50 / max(tan,0.01), 1)
+            pred_ic50 = round(ref_ic50/max(tan,0.01),1)
             vs_ref = "Better" if pred_ic50 < ref_ic50 else "Worse"
         return {
-            "name": name,
-            "smiles": Chem.MolToSmiles(mol),
-            "modification": mod,
-            "MW":   round(Descriptors.MolWt(mol),1),
-            "logP": round(Descriptors.MolLogP(mol),2),
-            "QED":  round(QED.qed(mol),3),
-            "HBD":  rdMolDescriptors.CalcNumHBD(mol),
-            "HBA":  rdMolDescriptors.CalcNumHBA(mol),
-            "TPSA": round(Descriptors.TPSA(mol),1),
-            "RotBonds": rdMolDescriptors.CalcNumRotatableBonds(mol),
-            "Lipinski": "PASS" if lipinski_pass(mol) else "FAIL",
-            "Tanimoto": tan,
-            "predicted_ic50_nm": pred_ic50,
-            "vs_ref_ic50": vs_ref,
-            "ref_ic50_nm": ref_ic50,
+            "name":             name,
+            "smiles":           Chem.MolToSmiles(mol),
+            "modification":     mod,
+            "MW":               round(Descriptors.MolWt(mol),1),
+            "logP":             round(Descriptors.MolLogP(mol),2),
+            "QED":              round(QED.qed(mol),3),
+            "HBD":              rdMolDescriptors.CalcNumHBD(mol),
+            "HBA":              rdMolDescriptors.CalcNumHBA(mol),
+            "TPSA":             round(Descriptors.TPSA(mol),1),
+            "RotBonds":         rdMolDescriptors.CalcNumRotatableBonds(mol),
+            "Lipinski":         "PASS" if lipinski_pass(mol) else "FAIL",
+            "Tanimoto":         tan,
+            "predicted_ic50_nm":pred_ic50,
+            "vs_ref_ic50":      vs_ref,
+            "ref_ic50_nm":      ref_ic50,
         }
     except Exception as e:
         print(f"  Error {name}: {e}")
@@ -127,7 +130,7 @@ def get_aromatic_positions(mol):
             a.GetSymbol()=="C" and
             a.GetTotalNumHs()>0]
 
-def add_sub(mol, atom_idx, sub_smi):
+def add_sub_to_position(mol, atom_idx, sub_smi):
     try:
         sub = Chem.MolFromSmiles(sub_smi)
         if sub is None: return None
@@ -158,8 +161,8 @@ if ref_mol is None:
 ref_smi = Chem.MolToSmiles(ref_mol)
 print(f"Reference: {ref_name} IC50={ref_ic50}nM")
 
-analogues = []
-existing_keys = set()
+analogues      = []
+existing_keys  = set()  # InChIKey based
 existing_names = set()
 
 # Reference
@@ -222,7 +225,7 @@ for name,smi,mod in KNOWN:
                 existing_names.add(name)
                 print(f"  + {name}")
 
-# R-group permutation
+# R-group permutation with InChIKey isomer filter
 print("\nR-group permutation...")
 positions = get_aromatic_positions(ref_mol)
 print(f"  Positions: {len(positions)}")
@@ -232,15 +235,20 @@ perm_count = 0
 for pos in positions:
     for sub_smi, sub_name in SUB_SMILES:
         try:
-            new_mol = add_sub(ref_mol, pos, sub_smi)
+            new_mol = add_sub_to_position(
+                ref_mol, pos, sub_smi)
             if new_mol is None: continue
+
+            # InChIKey isomer filter
             key = get_inchikey(new_mol)
             if key in existing_keys: continue
             if not lipinski_pass(new_mol): continue
+
             existing_keys.add(key)
             name = f"p{pos}_{sub_smi.replace('(','').replace(')','').replace('#','n')}"
             if name in existing_names:
                 name = f"{name}_{perm_count}"
+
             desc = get_descriptors(new_mol, name,
                 f"{sub_name} at pos {pos}", ref_mol)
             if desc:
@@ -264,20 +272,21 @@ if ref_ic50 > 0:
     print(f"Better IC50: {better}/{len(df)}")
 
 df.to_csv(out_csv, index=False)
-print(f"Saved: {out_csv}")
 
 # Image
 try:
     mols, legends = [], []
-    for _, row in df.head(12).iterrows():
+    for _, row in df.iterrows():
         mol = sanitize(row["smiles"])
         if mol:
             AllChem.Compute2DCoords(mol)
             mols.append(mol)
             legends.append(
                 f"{row['name']}\nMW:{row['MW']}\nIC50~{row['predicted_ic50_nm']}nM")
-    img = Draw.MolsToGridImage(mols, molsPerRow=3,
-        subImgSize=(400,300), legends=legends)
+    img = Draw.MolsToGridImage(
+        mols, molsPerRow=3,
+        subImgSize=(400,300),
+        legends=legends)
     img.save(out_png)
 except Exception as e:
     print(f"Image error: {e}")
